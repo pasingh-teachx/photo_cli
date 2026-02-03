@@ -13,6 +13,20 @@ from pathlib import Path
 from dataclasses import dataclass
 
 
+def check_exiftool_available() -> bool:
+    """
+    Check if exiftool is available on the system.
+
+    Returns:
+        True if exiftool is available, False otherwise
+    """
+    try:
+        result = subprocess.run(['exiftool', '-ver'], capture_output=True, timeout=5, check=False)
+        return result.returncode == 0
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        return False
+
+
 # Common date/time tags in order of preference
 DATETIME_TAGS = [
     'EXIF:DateTimeOriginal',
@@ -103,29 +117,14 @@ class ExifToolWrapper:
     """Wrapper for exiftool command-line operations."""
     
     def __init__(self):
-        self._check_exiftool()
-        self._config_path = _get_exiftool_config_path()
-    
-    def _check_exiftool(self):
-        """Verify exiftool is installed."""
-        try:
-            result = subprocess.run(
-                ['exiftool', '-ver'],
-                capture_output=True,
-                text=True,
-                timeout=10
-            )
-            if result.returncode != 0:
-                raise RuntimeError("exiftool returned non-zero exit code")
-        except FileNotFoundError:
+        if not check_exiftool_available():
             raise RuntimeError(
                 "exiftool not found. Please install it:\n"
                 "  Ubuntu/Debian: sudo apt-get install libimage-exiftool-perl\n"
                 "  macOS: brew install exiftool\n"
                 "  Windows: Download from https://exiftool.org/"
             )
-        except subprocess.TimeoutExpired:
-            raise RuntimeError("exiftool check timed out")
+        self._config_path = _get_exiftool_config_path()
     
     def _get_base_args(self) -> List[str]:
         """Get base exiftool arguments including config file."""
@@ -418,32 +417,39 @@ class MetadataHandler:
                              dry_run: bool = False) -> bool:
         """
         Set the DateTimeOriginal metadata.
-        
+
+        Only writes XMP:DateTimeOriginal if timezone information is available.
+
         Args:
             filepath: Path to the file
             dt: The datetime to set
             inferred: If True, mark as inferred
             inference_source: Source of inference (tag name or description)
             dry_run: If True, don't actually write
-        
+
         Returns:
             True if successful (or dry run)
         """
         if dry_run:
             return True
-        
+
         dt_str = dt.strftime('%Y:%m:%d %H:%M:%S')
-        
+
         tags = {
             'EXIF:DateTimeOriginal': dt_str,
-            'XMP:DateTimeOriginal': dt_str,
         }
-        
+
+        # Only write XMP:DateTimeOriginal if we have timezone information
+        if dt.tzinfo is not None:
+            # Format as ISO 8601 with timezone for XMP
+            xmp_dt_str = dt.isoformat()
+            tags['XMP:DateTimeOriginal'] = xmp_dt_str
+
         if inferred:
             tags[XMP_DATETIME_INFERRED] = 'true'
             if inference_source:
                 tags[XMP_DATETIME_INFERENCE_SOURCE] = inference_source
-        
+
         return self.exiftool.write_metadata(filepath, tags, preserve_original=False)
     
     def set_gps_coordinates(self, filepath: Path, latitude: float, longitude: float,

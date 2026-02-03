@@ -77,6 +77,8 @@ class PhotoOrganizer:
             'skipped_duplicate': 0,
             'skipped_no_datetime': 0,
             'skipped_no_location': 0,
+            'skipped_unsupported': 0,
+            'skipped_system': 0,
             'errors': 0,
         }
     
@@ -124,27 +126,114 @@ class PhotoOrganizer:
         
         return result
     
-    def _get_destination_path(self, dt: datetime, original_filename: str, 
+    def _get_destination_path(self, dt: datetime, original_filename: str,
                              ext: str) -> Path:
         """
         Calculate the destination path for a file.
-        
+
         Args:
             dt: The datetime to use for organization
             original_filename: Original filename
             ext: File extension
-        
+
         Returns:
             Full destination path
         """
         folder = self._format_pattern(self.config.folder_pattern, dt, original_filename, ext)
         filename = self._format_pattern(self.config.filename_pattern, dt, original_filename, ext)
-        
+
         # Ensure extension is added
         if not filename.lower().endswith(ext.lower()):
             filename = f"{filename}.{ext.lstrip('.')}"
-        
+
         return self.config.destination_path / folder / filename
+
+    def _get_skipped_path(self, filepath: Path, skip_reason: str) -> Path:
+        """
+        Calculate the destination path for a skipped file.
+
+        Args:
+            filepath: Source file path
+            skip_reason: Reason for skipping (e.g., 'no_datetime', 'no_location')
+
+        Returns:
+            Full destination path in skipped folder
+        """
+        # Get relative path from source
+        try:
+            if self.config.source_path.is_file():
+                # If source is a single file, use just the filename
+                relative_path = filepath.name
+            else:
+                # Get relative path from source directory
+                relative_path = filepath.relative_to(self.config.source_path)
+        except ValueError:
+            # If relative_to fails, use the full path as fallback
+            relative_path = filepath.name
+
+        # Build path: destination/skipped/skip_reason/relative_path
+        return self.config.destination_path / 'skipped' / skip_reason / relative_path
+
+    def _collect_skipped_file(self, filepath: Path, skip_reason: str, message: str) -> ProcessingResult:
+        """
+        Collect a skipped file by copying/moving it to the skipped folder.
+
+        Args:
+            filepath: Source file path
+            skip_reason: Reason for skipping
+            message: Skip message
+
+        Returns:
+            ProcessingResult with collected destination
+        """
+        dest_path = self._get_skipped_path(filepath, skip_reason)
+
+        if self.config.dry_run:
+            self._log(f"  [DRY RUN] Would collect skipped file: {filepath}")
+            self._log(f"            To: {dest_path}")
+            self._log(f"            Reason: {message}")
+            self.stats[f'skipped_{skip_reason}'] += 1
+            return ProcessingResult(
+                source_path=filepath,
+                destination_path=dest_path,
+                status=f'skipped_{skip_reason}',
+                message=message
+            )
+
+        # Create destination directory
+        dest_path.parent.mkdir(parents=True, exist_ok=True)
+
+        # Copy or move the file, preserving metadata
+        try:
+            if self.config.move_files:
+                success = self.metadata_handler.move_file_with_metadata(filepath, dest_path)
+            else:
+                success = self.metadata_handler.copy_file_with_metadata(filepath, dest_path)
+
+            if success:
+                self.stats[f'skipped_{skip_reason}'] += 1
+                return ProcessingResult(
+                    source_path=filepath,
+                    destination_path=dest_path,
+                    status=f'skipped_{skip_reason}',
+                    message=message
+                )
+            else:
+                self.stats['errors'] += 1
+                return ProcessingResult(
+                    source_path=filepath,
+                    destination_path=None,
+                    status='error',
+                    message=f"Failed to collect skipped file: {message}"
+                )
+        except Exception as e:
+            self.stats['errors'] += 1
+            return ProcessingResult(
+                source_path=filepath,
+                destination_path=None,
+                status='error',
+                message=f"Error collecting skipped file: {str(e)}"
+            )
     
     def _prompt_for_location(self, filepath: Path, metadata: MediaMetadata) -> Optional[Tuple[float, float]]:
         """
@@ -228,7 +317,7 @@ class PhotoOrganizer:
             return inferred_dt, f"Inferred from {source_tag} (matched date within 2 days)", True
         
         # No match found - prompt user for time
-        if not self.config.dry_run:
+        if self.config.interactive:
             user_time = self._prompt_for_time(filepath, wa_datetime)
             if user_time:
                 dt = datetime.combine(wa_datetime.date_value, user_time)
@@ -333,27 +422,83 @@ class PhotoOrganizer:
     
     def scan_source_files(self) -> List[Path]:
         """
-        Scan source directory for media files.
-        
+        Scan source directory for all files.
+
         Returns:
-            List of file paths
+            List of file paths (all files, not just supported media files)
         """
         source = self.config.source_path
-        extensions = self.config.supported_extensions
-        
+
         files = []
-        
+
         if source.is_file():
-            if source.suffix.lower() in extensions:
-                files.append(source)
+            files.append(source)
         else:
             pattern = '**/*' if self.config.recursive else '*'
             for filepath in source.glob(pattern):
-                if filepath.is_file() and filepath.suffix.lower() in extensions:
+                if filepath.is_file():
                     files.append(filepath)
-        
+
         return sorted(files)
-    
+
+    def _should_skip_file(self, filepath: Path) -> bool:
+        """
+        Check if a file should be skipped entirely (not even collected).
+
+        Args:
+            filepath: Path to the file
+
+        Returns:
+            True if the file should be skipped
+        """
+        filename = filepath.name
+
+        # Skip common system/temporary files
+        skip_patterns = [
+            # macOS
+            '.DS_Store',
+            '._*',  # AppleDouble files
+            '.Spotlight-V100',
+            '.Trashes',
+            'Icon\r',  # Custom folder icons
+
+            # Windows
+            'Thumbs.db',
+            'desktop.ini',
+            'ehthumbs.db',
+
+            # Version control
+            '.git',
+            '.svn',
+            '.hg',
+
+            # Temporary files
+            '*.tmp',
+            '*.temp',
+            '*.swp',
+            '*.bak',
+            '~$*',  # Office temporary files
+
+            # System files
+            '$RECYCLE.BIN',
+            'System Volume Information',
+        ]
+
+        # Check exact filename matches
+        if filename in skip_patterns:
+            return True
+
+        # Check patterns with wildcards
+        import fnmatch
+        for pattern in skip_patterns:
+            if '*' in pattern and fnmatch.fnmatch(filename, pattern):
+                return True
+
+        # Skip hidden files (starting with .) except for some extensions we might want
+        # But actually, let's not skip all hidden files since some might be important
+
+        return False
+
     def process_file(self, filepath: Path) -> ProcessingResult:
         """
         Process a single media file.
@@ -365,7 +510,32 @@ class PhotoOrganizer:
             ProcessingResult with details of what happened
         """
         self.stats['total_files'] += 1
-        
+
+        # Skip system/temporary files that are not useful to collect
+        if self._should_skip_file(filepath):
+            self.stats['skipped_system'] = self.stats.get('skipped_system', 0) + 1
+            return ProcessingResult(
+                source_path=filepath,
+                destination_path=None,
+                status='skipped_system',
+                message="System or temporary file"
+            )
+
+        # Check if file extension is supported
+        if filepath.suffix.lower() not in self.config.supported_extensions:
+            if self.config.collect_skipped:
+                return self._collect_skipped_file(
+                    filepath, 'unsupported', f"Unsupported file extension: {filepath.suffix}"
+                )
+            else:
+                self.stats['skipped_unsupported'] = self.stats.get('skipped_unsupported', 0) + 1
+                return ProcessingResult(
+                    source_path=filepath,
+                    destination_path=None,
+                    status='skipped_unsupported',
+                    message=f"Unsupported file extension: {filepath.suffix}"
+                )
+
         try:
             # Read metadata
             metadata = self.metadata_handler.read_metadata(filepath)
@@ -423,15 +593,20 @@ class PhotoOrganizer:
                         filepath, metadata, wa_datetime
                     )
             
-            # If still no datetime, skip the file
+            # If still no datetime, skip or collect the file
             if dt is None:
-                self.stats['skipped_no_datetime'] += 1
-                return ProcessingResult(
-                    source_path=filepath,
-                    destination_path=None,
-                    status='skipped_no_datetime',
-                    message="No datetime found in metadata or filename"
-                )
+                if self.config.collect_skipped:
+                    return self._collect_skipped_file(
+                        filepath, 'no_datetime', "No datetime found in metadata or filename"
+                    )
+                else:
+                    self.stats['skipped_no_datetime'] += 1
+                    return ProcessingResult(
+                        source_path=filepath,
+                        destination_path=None,
+                        status='skipped_no_datetime',
+                        message="No datetime found in metadata or filename"
+                    )
             
             # Handle location requirement
             location_to_set = None
@@ -439,18 +614,34 @@ class PhotoOrganizer:
                 if self.config.default_location:
                     location_to_set = self.config.default_location
                 elif not self.config.skip_location:
-                    if not self.config.dry_run:
+                    if self.config.interactive:
                         location_to_set = self._prompt_for_location(filepath, metadata)
                         if location_to_set is None:
+                            if self.config.collect_skipped:
+                                return self._collect_skipped_file(
+                                    filepath, 'no_location', "User skipped file (no location provided)"
+                                )
+                            else:
+                                self.stats['skipped_no_location'] += 1
+                                return ProcessingResult(
+                                    source_path=filepath,
+                                    destination_path=None,
+                                    status='skipped_no_location',
+                                    message="User skipped file (no location provided)"
+                                )
+                    else:
+                        # Non-interactive or dry-run mode
+                        skip_message = "Non-interactive mode - no GPS location" if self.config.non_interactive else "Dry run - would prompt for location"
+                        if self.config.collect_skipped:
+                            return self._collect_skipped_file(filepath, 'no_location', skip_message)
+                        else:
                             self.stats['skipped_no_location'] += 1
                             return ProcessingResult(
                                 source_path=filepath,
                                 destination_path=None,
                                 status='skipped_no_location',
-                                message="User skipped file (no location provided)"
+                                message=skip_message
                             )
-                    else:
-                        self._log(f"  [DRY RUN] Would prompt for location for: {filepath.name}")
             
             # Calculate destination path
             dest_path = self._get_destination_path(dt, original_filename, filepath.suffix)
@@ -592,6 +783,8 @@ class PhotoOrganizer:
                 'skipped_duplicate': 'duplicate',
                 'skipped_no_datetime': 'no datetime in metadata or filename',
                 'skipped_no_location': 'no GPS location provided',
+                'skipped_unsupported': 'unsupported file type',
+                'skipped_system': 'system or temporary file',
             }
             skip_reason = skip_reasons_map.get(result.status, result.message)
             error_message = None
@@ -700,6 +893,8 @@ class PhotoOrganizer:
             logger.info(f"  Skipped (duplicates): {self.stats['skipped_duplicate']}")
             logger.info(f"  Skipped (no datetime): {self.stats['skipped_no_datetime']}")
             logger.info(f"  Skipped (no location): {self.stats['skipped_no_location']}")
+            logger.info(f"  Skipped (unsupported): {self.stats['skipped_unsupported']}")
+            logger.info(f"  Skipped (system): {self.stats['skipped_system']}")
             logger.info(f"  Errors: {self.stats['errors']}")
             
             if self.config.dry_run:

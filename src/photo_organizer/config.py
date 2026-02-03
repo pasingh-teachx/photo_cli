@@ -25,14 +25,16 @@ SUPPORTED_EXTENSIONS = SUPPORTED_IMAGE_EXTENSIONS | SUPPORTED_VIDEO_EXTENSIONS
 @dataclass
 class OrganizerConfig:
     """Configuration for the photo organizer."""
-    
+
     # Source and destination paths
     source_path: Path = field(default_factory=lambda: Path('.'))
     destination_path: Path = field(default_factory=lambda: Path('./organized'))
-    
+
     # Operation mode
     move_files: bool = False  # False = copy (default), True = move
     dry_run: bool = False  # Preview changes without applying
+    non_interactive: bool = False  # Skip prompts for missing data
+    collect_skipped: bool = True  # Collect unprocessable files in skipped folder
     
     # Folder and filename patterns
     # Default folder: 2025-01-Jan (year-month_num-month_short)
@@ -56,8 +58,13 @@ class OrganizerConfig:
     
     # Verbosity
     verbose: bool = False
-    
-    # Supported extensions (derived from flags)
+
+    # Derived properties
+    @property
+    def interactive(self) -> bool:
+        """Whether the tool can prompt for user input."""
+        return not self.dry_run and not self.non_interactive
+
     @property
     def supported_extensions(self) -> set:
         """Get the set of supported file extensions based on config."""
@@ -106,6 +113,8 @@ class OrganizerConfig:
             destination_path=Path(args.destination),
             move_files=getattr(args, 'move', False),
             dry_run=getattr(args, 'dry_run', False),
+            non_interactive=getattr(args, 'non_interactive', False),
+            collect_skipped=not getattr(args, 'no_collect_skipped', False),  # Default True, flag disables
             folder_pattern=getattr(args, 'folder_pattern', cls.folder_pattern),
             filename_pattern=getattr(args, 'filename_pattern', cls.filename_pattern),
             skip_location=getattr(args, 'skip_location', False),

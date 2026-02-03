@@ -3,12 +3,14 @@ Command-line interface for the Photo Organizer.
 """
 
 import argparse
+import subprocess
 import sys
 from pathlib import Path
 
 from . import __version__
 from .config import OrganizerConfig
 from .organizer import PhotoOrganizer
+from .metadata import check_exiftool_available
 
 
 def create_parser() -> argparse.ArgumentParser:
@@ -17,25 +19,34 @@ def create_parser() -> argparse.ArgumentParser:
         prog='photo-organizer',
         description='EXIF metadata-based photo and video organizer',
         formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+
+    subparsers = parser.add_subparsers(dest='command', help='Available commands', required=True)
+
+    # Import command (existing functionality)
+    import_parser = subparsers.add_parser(
+        'import',
+        help='Import and organize photos/videos',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
   # Basic import (copy mode)
-  photo-organizer /path/to/source /path/to/destination
-  
+  photo-organizer import /path/to/source /path/to/destination
+
   # Dry run - preview changes
-  photo-organizer /path/to/source /path/to/destination --dry-run
-  
+  photo-organizer import /path/to/source /path/to/destination --dry-run
+
   # Move files instead of copying
-  photo-organizer /path/to/source /path/to/destination --move
-  
+  photo-organizer import /path/to/source /path/to/destination --move
+
   # Set GPS for batch of photos from same location
-  photo-organizer /path/to/source /path/to/destination --location "37.7749,-122.4194"
-  
+  photo-organizer import /path/to/source /path/to/destination --location "37.7749,-122.4194"
+
   # Skip location prompts
-  photo-organizer /path/to/source /path/to/destination --skip-location
-  
+  photo-organizer import /path/to/source /path/to/destination --skip-location
+
   # Custom folder and filename patterns
-  photo-organizer /path/to/source /path/to/destination \\
+  photo-organizer import /path/to/source /path/to/destination \\
     --folder-pattern "{year}/{month:02d}-{month_name}" \\
     --filename-pattern "{year}{month:02d}{day:02d}_{hour:02d}{min:02d}{sec:02d}_{original_name}"
 
@@ -52,21 +63,21 @@ Pattern Variables:
   {ext}              - File extension (lowercase)
 """
     )
-    
-    # Positional arguments
-    parser.add_argument(
+
+    # Import command arguments
+    import_parser.add_argument(
         'source',
         type=str,
         help='Source directory or file to import'
     )
-    parser.add_argument(
+    import_parser.add_argument(
         'destination',
         type=str,
         help='Destination directory for organized files'
     )
     
-    # Operation mode
-    mode_group = parser.add_argument_group('Operation Mode')
+    # Import operation mode
+    mode_group = import_parser.add_argument_group('Operation Mode')
     mode_group.add_argument(
         '--move',
         action='store_true',
@@ -79,9 +90,21 @@ Pattern Variables:
         default=False,
         help='Preview changes without modifying files'
     )
+    mode_group.add_argument(
+        '--non-interactive',
+        action='store_true',
+        default=False,
+        help='Skip user prompts for missing data (e.g., GPS, datetime)'
+    )
+    mode_group.add_argument(
+        '--no-collect-skipped',
+        action='store_true',
+        default=False,
+        help='Do not collect files that cannot be processed (skip them instead)'
+    )
     
-    # Output patterns
-    pattern_group = parser.add_argument_group('Output Patterns')
+    # Import output patterns
+    pattern_group = import_parser.add_argument_group('Output Patterns')
     pattern_group.add_argument(
         '--folder-pattern',
         type=str,
@@ -95,8 +118,8 @@ Pattern Variables:
         help='Filename pattern (default: %(default)s)'
     )
     
-    # Location handling
-    location_group = parser.add_argument_group('Location Handling')
+    # Import location handling
+    location_group = import_parser.add_argument_group('Location Handling')
     location_group.add_argument(
         '--location',
         type=str,
@@ -110,8 +133,8 @@ Pattern Variables:
         help='Skip prompting for missing GPS coordinates'
     )
     
-    # Duplicate handling
-    dup_group = parser.add_argument_group('Duplicate Handling')
+    # Import duplicate handling
+    dup_group = import_parser.add_argument_group('Duplicate Handling')
     dup_group.add_argument(
         '--allow-duplicates',
         action='store_true',
@@ -119,8 +142,8 @@ Pattern Variables:
         help='Process files even if they are duplicates'
     )
     
-    # Reporting
-    report_group = parser.add_argument_group('Reporting')
+    # Import reporting
+    report_group = import_parser.add_argument_group('Reporting')
     report_group.add_argument(
         '--report-dir',
         type=str,
@@ -134,8 +157,8 @@ Pattern Variables:
         help='Do not generate reports'
     )
     
-    # File type filters
-    filter_group = parser.add_argument_group('File Filters')
+    # Import file type filters
+    filter_group = import_parser.add_argument_group('File Filters')
     filter_group.add_argument(
         '--images-only',
         action='store_true',
@@ -154,20 +177,72 @@ Pattern Variables:
         default=False,
         help='Do not scan subdirectories'
     )
-    
-    # General options
-    parser.add_argument(
+
+    # Flatten command
+    flatten_parser = subparsers.add_parser(
+        'flatten',
+        help='Flatten skipped folders into a single directory',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  # Flatten skipped folders (copy mode)
+  photo-organizer flatten /path/to/skipped /path/to/destination
+
+  # Flatten and move files
+  photo-organizer flatten /path/to/skipped /path/to/destination --move
+
+  # Dry run - preview changes
+  photo-organizer flatten /path/to/skipped /path/to/destination --dry-run
+"""
+    )
+
+    flatten_parser.add_argument(
+        'source',
+        type=str,
+        help='Source directory containing skipped folders to flatten'
+    )
+    flatten_parser.add_argument(
+        'destination',
+        type=str,
+        help='Destination directory for flattened files'
+    )
+
+    flatten_parser.add_argument(
+        '--move',
+        action='store_true',
+        default=False,
+        help='Move files instead of copying (default: copy)'
+    )
+    flatten_parser.add_argument(
+        '--dry-run',
+        action='store_true',
+        default=False,
+        help='Preview changes without modifying files'
+    )
+
+    # Add verbose to both subcommands
+    import_parser.add_argument(
         '-v', '--verbose',
         action='store_true',
         default=False,
         help='Enable verbose output'
     )
+    flatten_parser.add_argument(
+        '-v', '--verbose',
+        action='store_true',
+        default=False,
+        help='Enable verbose output'
+    )
+
+    # General options
     parser.add_argument(
         '--version',
         action='version',
         version=f'%(prog)s {__version__}'
     )
-    
+
+
+
     return parser
 
 
@@ -184,7 +259,30 @@ def main(argv=None):
     """Main entry point for the CLI."""
     parser = create_parser()
     args = parser.parse_args(argv)
-    
+
+    # Handle different commands
+    if args.command == 'flatten':
+        return main_flatten(args)
+    elif args.command == 'import' or args.command is None:
+        return main_import(args)
+    else:
+        parser.print_help()
+        return 1
+
+
+def main_import(args):
+    """Handle the import command."""
+    # Check if exiftool is available
+    if not check_exiftool_available():
+        print("Error: exiftool is not installed or not available in PATH.", file=sys.stderr)
+        print("Photo Organizer requires exiftool to read and write metadata.", file=sys.stderr)
+        print("Please install exiftool:", file=sys.stderr)
+        print("  - Ubuntu/Debian: sudo apt-get install libimage-exiftool-perl", file=sys.stderr)
+        print("  - macOS: brew install exiftool", file=sys.stderr)
+        print("  - Windows: Download from https://exiftool.org/", file=sys.stderr)
+        print("  - Or visit https://exiftool.org/ for installation instructions.", file=sys.stderr)
+        return 1
+
     # Validate source exists
     source_path = Path(args.source)
     if not source_path.exists():
@@ -230,6 +328,34 @@ def main(argv=None):
     except KeyboardInterrupt:
         print("\nOperation cancelled by user.")
         return 130
+    except Exception as e:
+        print(f"Error: {e}", file=sys.stderr)
+        if args.verbose:
+            import traceback
+            traceback.print_exc()
+        return 1
+
+
+def main_flatten(args):
+    """Handle the flatten command."""
+    from .flatten import flatten_skipped_folders
+
+    source_path = Path(args.source)
+    if not source_path.exists():
+        print(f"Error: Source path does not exist: {args.source}", file=sys.stderr)
+        return 1
+
+    destination_path = Path(args.destination)
+
+    try:
+        flatten_skipped_folders(
+            source_path,
+            destination_path,
+            move_files=args.move,
+            dry_run=args.dry_run,
+            verbose=args.verbose
+        )
+        return 0
     except Exception as e:
         print(f"Error: {e}", file=sys.stderr)
         if args.verbose:

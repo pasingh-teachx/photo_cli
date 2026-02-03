@@ -19,9 +19,11 @@ class TestOrganizerConfig:
     def test_default_values(self):
         """Test default configuration values."""
         config = OrganizerConfig()
-        
+
         assert config.move_files is False
         assert config.dry_run is False
+        assert config.non_interactive is False
+        assert config.collect_skipped is True
         assert config.skip_location is False
         assert config.default_location is None
         assert config.skip_duplicates is True
@@ -29,7 +31,26 @@ class TestOrganizerConfig:
         assert config.include_videos is True
         assert config.recursive is True
         assert config.verbose is False
-    
+        assert config.interactive is True  # Default: not dry_run and not non_interactive
+
+    def test_interactive_property(self):
+        """Test interactive property logic."""
+        # Default config is interactive
+        config = OrganizerConfig()
+        assert config.interactive is True
+
+        # Dry run is not interactive
+        config = OrganizerConfig(dry_run=True)
+        assert config.interactive is False
+
+        # Non-interactive is not interactive
+        config = OrganizerConfig(non_interactive=True)
+        assert config.interactive is False
+
+        # Dry run and non-interactive is not interactive
+        config = OrganizerConfig(dry_run=True, non_interactive=True)
+        assert config.interactive is False
+
     def test_default_patterns(self):
         """Test default folder and filename patterns."""
         config = OrganizerConfig()
@@ -128,6 +149,8 @@ class TestOrganizerConfig:
                 destination='/output',
                 move=True,
                 dry_run=True,
+                non_interactive=True,
+                no_collect_skipped=False,
                 folder_pattern='{year}/{month:02d}',
                 filename_pattern='{original_name}',
                 skip_location=True,
@@ -138,13 +161,15 @@ class TestOrganizerConfig:
                 no_recursive=False,
                 verbose=True,
             )
-            
+
             config = OrganizerConfig.from_args(args)
-            
+
             assert config.source_path == Path(tmpdir)
             assert config.destination_path == Path('/output')
             assert config.move_files is True
             assert config.dry_run is True
+            assert config.non_interactive is True
+            assert config.collect_skipped is True
             assert config.folder_pattern == '{year}/{month:02d}'
             assert config.filename_pattern == '{original_name}'
             assert config.skip_location is True
@@ -159,6 +184,8 @@ class TestOrganizerConfig:
                 destination='/output',
                 move=False,
                 dry_run=False,
+                non_interactive=False,
+                no_collect_skipped=False,
                 folder_pattern='{year}',
                 filename_pattern='{original_name}',
                 skip_location=False,
@@ -169,9 +196,9 @@ class TestOrganizerConfig:
                 no_recursive=False,
                 verbose=False,
             )
-            
+
             config = OrganizerConfig.from_args(args)
-            
+
             # Invalid location should result in None
             assert config.default_location is None
 
